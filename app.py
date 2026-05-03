@@ -263,6 +263,11 @@ def show_case_navigation(cases: List[CaseData]):
             st.rerun()
 
 
+def _step_slice(slider_key: str, delta: int, max_idx: int):
+    current = int(st.session_state.get(slider_key, 0))
+    st.session_state[slider_key] = max(0, min(current + delta, max_idx))
+
+
 def render_sequence_viewer(case: CaseData):
     st.markdown(f"### {case.folder_name}")
     available = [seq for seq in DISPLAY_SEQUENCES if seq in case.sequences]
@@ -279,47 +284,44 @@ def render_sequence_viewer(case: CaseData):
         st.warning("Nessuna immagine trovata per questa sequenza.")
         return
 
-    state_key = f"slice_idx_state__{case.folder_name}__{selected}"
-    slider_widget_key = f"slice_idx_widget__{case.folder_name}__{selected}"
+    slider_key = f"slice_idx__{case.folder_name}__{selected}"
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = 0
 
-    if state_key not in st.session_state:
-        st.session_state[state_key] = 0
-
-    st.session_state[state_key] = max(0, min(int(st.session_state[state_key]), total - 1))
+    st.session_state[slider_key] = max(0, min(int(st.session_state[slider_key]), total - 1))
 
     c1, c2, c3 = st.columns([1, 4, 1])
+
     with c1:
-        if st.button(
+        st.button(
             "◀ Prev",
             key=f"prev_{case.folder_name}_{selected}",
             use_container_width=True,
-            disabled=st.session_state[state_key] <= 0,
-        ):
-            st.session_state[state_key] -= 1
-            st.rerun()
+            disabled=st.session_state[slider_key] <= 0,
+            on_click=_step_slice,
+            args=(slider_key, -1, total - 1),
+        )
 
     with c2:
-        slider_value = st.slider(
+        st.slider(
             "Slice",
-            0,
-            total - 1,
-            value=st.session_state[state_key],
-            key=slider_widget_key,
+            min_value=0,
+            max_value=total - 1,
+            key=slider_key,
             label_visibility="collapsed",
         )
-        st.session_state[state_key] = slider_value
 
     with c3:
-        if st.button(
+        st.button(
             "Next ▶",
             key=f"next_{case.folder_name}_{selected}",
             use_container_width=True,
-            disabled=st.session_state[state_key] >= total - 1,
-        ):
-            st.session_state[state_key] += 1
-            st.rerun()
+            disabled=st.session_state[slider_key] >= total - 1,
+            on_click=_step_slice,
+            args=(slider_key, 1, total - 1),
+        )
 
-    idx = st.session_state[state_key]
+    idx = int(st.session_state[slider_key])
     st.caption(f"Slice {idx + 1} / {total}")
     image = load_image(str(paths[idx]))
     st.image(image, use_container_width=True)
