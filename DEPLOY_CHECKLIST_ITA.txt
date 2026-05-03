@@ -1,0 +1,31 @@
+CHECKLIST RAPIDA
+
+1) GITHUB
+- Crea un nuovo repository
+- Carica tutti i file di questo pacchetto
+- Aggiungi la cartella CASI_RM con le immagini
+
+2) DATABASE POSTGRESQL
+- Crea un database PostgreSQL remoto
+- Copia la connection string completa
+- Se il provider richiede SSL, lascia ?sslmode=require
+
+3) STREAMLIT
+- Vai su Streamlit Community Cloud
+- Create app
+- Scegli repository, branch e app.py
+- In Settings > Secrets incolla:
+
+case_root = "CASI_RM"
+database_url = "postgresql+psycopg2://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+
+4) TEST
+- Apri il link
+- Inserisci un ID valutatore
+- Compila e salva un caso
+- Verifica che il caso successivo si sblocchi
+
+5) SE QUALCOSA NON VA
+- Errore database: controlla database_url
+- Nessun caso trovato: controlla che CASI_RM sia nel repo
+- DCE non visibile: usa cartella DCE o T1_CE
