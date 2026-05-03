@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List
 
 import streamlit as st
 from PIL import Image
+from sqlalchemy import select
 
-from db import DatabaseManager, EvaluatorProfile
+from db import DatabaseManager, Evaluator, EvaluatorProfile
 from local_repository import DISPLAY_SEQUENCES, CaseData, LocalCaseRepository
 from scoring import compute_dce_total, compute_dwi_total, compute_piqual_final, compute_t2_total, required_fields_complete
 
 APP_TITLE = "PI-QUAL 2 Viewer Web"
 DEFAULT_CASE_ROOT = "CASI_RM"
+EVALUATOR_ID_PREFIX = "TSRM"
+EVALUATOR_ID_WIDTH = 3
+FORCED_YES_FIELDS = {
+    "T2_Req_Spessore3mm",
+    "DWI_Req_SpessoreLE4mm",
+    "DWI_Req_Bhigh_GE1400",
+    "DWI_Req_ADC_due_b_fino1000",
+    "DCE_Req_Spessore3mm",
+    "DCE_Req_RisoluzioneTemporaleLE15s",
+}
+
 QUESTION_SPECS = {
     "T2_Req_Spessore3mm": ("Prerequisito essenziale: spessore della fetta 3 mm", ["Sì", "No"]),
     "T2_Item1_SNR_assiale": ("T2-WI assiale: adeguato rapporto segnale/rumore (SNR) in tutte le parti delle immagini", ["1", "0"]),
@@ -64,6 +77,72 @@ def get_case_root() -> str:
     return DEFAULT_CASE_ROOT
 
 
+def widget_key(case: CaseData, field_key: str) -> str:
+    return f"{case.excel_prefix}__{field_key}"
+
+
+def answer_from_state(case: CaseData, field_key: str) -> str:
+    return str(st.session_state.get(widget_key(case, field_key), "")).strip()
+
+
+def enforce_forced_yes_for_case(case: CaseData):
+    for field_key in FORCED_YES_FIELDS:
+        st.session_state[widget_key(case, field_key)] = "Sì"
+
+
+def enforce_forced_yes_defaults(cases: List[CaseData]):
+    for case in cases:
+        enforce_forced_yes_for_case(case)
+
+
+def fields_complete(case: CaseData) -> bool:
+    return required_fields_complete(lambda key: answer_from_state(case, key))
+
+
+def set_answers_from_db(case: CaseData, data: Dict[str, str]):
+    for field_key in FIELD_ORDER:
+        if field_key in FORCED_YES_FIELDS:
+            st.session_state[widget_key(case, field_key)] = "Sì"
+            continue
+        value = str(data.get(field_key, "")).strip()
+        if value:
+            st.session_state[widget_key(case, field_key)] = value
+
+
+def suggest_next_evaluator_id() -> str:
+    db = get_db()
+    used_ids = set()
+    pattern = re.compile(rf"^{re.escape(EVALUATOR_ID_PREFIX)}(\d+)$")
+
+    with db.session() as session:
+        rows = session.execute(select(Evaluator.evaluator_id)).all()
+        for (value,) in rows:
+            if value:
+                used_ids.add(str(value).strip())
+
+    max_seen = 0
+    used_numbers = set()
+    for value in used_ids:
+        match = pattern.match(value)
+        if match:
+            number = int(match.group(1))
+            used_numbers.add(number)
+            max_seen = max(max_seen, number)
+
+    for number in range(1, max_seen + 2):
+        if number not in used_numbers:
+            return f"{EVALUATOR_ID_PREFIX}{number:0{EVALUATOR_ID_WIDTH}d}"
+
+    return f"{EVALUATOR_ID_PREFIX}{1:0{EVALUATOR_ID_WIDTH}d}"
+
+
+def assign_next_evaluator_id(force: bool = False):
+    current_value = st.session_state.get("eval_id", "").strip()
+    if current_value and not force:
+        return
+    st.session_state.eval_id = suggest_next_evaluator_id()
+
+
 def init_session_state(cases: List[CaseData]):
     st.session_state.setdefault("current_case_index", 0)
     st.session_state.setdefault("eval_id", "")
@@ -82,29 +161,13 @@ def init_session_state(cases: List[CaseData]):
             available = [seq for seq in DISPLAY_SEQUENCES if seq in case.sequences]
             st.session_state[seq_key] = available[0] if available else ""
         for seq_name in DISPLAY_SEQUENCES:
-            slider_key = f"slice_idx__{case.folder_name}__{seq_name}"
-            st.session_state.setdefault(slider_key, 0)
+            state_key = f"slice_idx_state__{case.folder_name}__{seq_name}"
+            st.session_state.setdefault(state_key, 0)
         for field_key in FIELD_ORDER:
-            st.session_state.setdefault(widget_key(case, field_key), "")
+            default_value = "Sì" if field_key in FORCED_YES_FIELDS else ""
+            st.session_state.setdefault(widget_key(case, field_key), default_value)
 
-
-def widget_key(case: CaseData, field_key: str) -> str:
-    return f"{case.excel_prefix}__{field_key}"
-
-
-def answer_from_state(case: CaseData, field_key: str) -> str:
-    return str(st.session_state.get(widget_key(case, field_key), "")).strip()
-
-
-def fields_complete(case: CaseData) -> bool:
-    return required_fields_complete(lambda key: answer_from_state(case, key))
-
-
-def set_answers_from_db(case: CaseData, data: Dict[str, str]):
-    for field_key in FIELD_ORDER:
-        value = str(data.get(field_key, "")).strip()
-        if value:
-            st.session_state[widget_key(case, field_key)] = value
+    enforce_forced_yes_defaults(cases)
 
 
 def load_evaluator_data(cases: List[CaseData]):
@@ -126,6 +189,7 @@ def load_evaluator_data(cases: List[CaseData]):
         case_data = db.load_case_response(evaluator_id, case.folder_name)
         if case_data:
             set_answers_from_db(case, case_data)
+    enforce_forced_yes_defaults(cases)
     st.session_state.last_message = ("success", "Dati del valutatore caricati.")
 
 
@@ -211,70 +275,116 @@ def render_sequence_viewer(case: CaseData):
 
     paths = case.sequences[selected]
     total = len(paths)
-    slider_key = f"slice_idx__{case.folder_name}__{selected}"
-    st.session_state[slider_key] = min(int(st.session_state.get(slider_key, 0)), max(total - 1, 0))
+    if total == 0:
+        st.warning("Nessuna immagine trovata per questa sequenza.")
+        return
+
+    state_key = f"slice_idx_state__{case.folder_name}__{selected}"
+    slider_widget_key = f"slice_idx_widget__{case.folder_name}__{selected}"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0
+
+    st.session_state[state_key] = max(0, min(int(st.session_state[state_key]), total - 1))
 
     c1, c2, c3 = st.columns([1, 4, 1])
     with c1:
-        if st.button("◀ Prev", key=f"prev_{case.folder_name}_{selected}", use_container_width=True, disabled=st.session_state[slider_key] <= 0):
-            st.session_state[slider_key] -= 1
-            st.rerun()
-    with c2:
-        st.slider("Slice", 0, total - 1, key=slider_key, label_visibility="collapsed")
-    with c3:
-        if st.button("Next ▶", key=f"next_{case.folder_name}_{selected}", use_container_width=True, disabled=st.session_state[slider_key] >= total - 1):
-            st.session_state[slider_key] += 1
+        if st.button(
+            "◀ Prev",
+            key=f"prev_{case.folder_name}_{selected}",
+            use_container_width=True,
+            disabled=st.session_state[state_key] <= 0,
+        ):
+            st.session_state[state_key] -= 1
             st.rerun()
 
-    idx = st.session_state[slider_key]
+    with c2:
+        slider_value = st.slider(
+            "Slice",
+            0,
+            total - 1,
+            value=st.session_state[state_key],
+            key=slider_widget_key,
+            label_visibility="collapsed",
+        )
+        st.session_state[state_key] = slider_value
+
+    with c3:
+        if st.button(
+            "Next ▶",
+            key=f"next_{case.folder_name}_{selected}",
+            use_container_width=True,
+            disabled=st.session_state[state_key] >= total - 1,
+        ):
+            st.session_state[state_key] += 1
+            st.rerun()
+
+    idx = st.session_state[state_key]
     st.caption(f"Slice {idx + 1} / {total}")
     image = load_image(str(paths[idx]))
     st.image(image, use_container_width=True)
 
 
+def render_fixed_yes_question(case: CaseData, key: str):
+    label, options = QUESTION_SPECS[key]
+    st.session_state[widget_key(case, key)] = "Sì"
+    st.radio(
+        label,
+        options=options,
+        index=0,
+        key=widget_key(case, key),
+        disabled=True,
+    )
+
+
+def render_editable_question(case: CaseData, key: str):
+    label, options = QUESTION_SPECS[key]
+    current = answer_from_state(case, key)
+    index = options.index(current) if current in options else None
+    st.radio(label, options=options, index=index, key=widget_key(case, key))
+
+
 def render_questionnaire(case: CaseData):
+    enforce_forced_yes_for_case(case)
     st.markdown("### Questionario PI-QUAL 2.1")
     with st.form(key=f"form_{case.folder_name}"):
         st.markdown("**T2-WI**")
+        render_fixed_yes_question(case, "T2_Req_Spessore3mm")
         for key in [
-            "T2_Req_Spessore3mm",
             "T2_Item1_SNR_assiale",
             "T2_Item2_Delineazione_strutture",
             "T2_Item3_Artefatti_assiale",
             "T2_Item4_SagCor_adeguato",
         ]:
-            label, options = QUESTION_SPECS[key]
-            current = answer_from_state(case, key)
-            index = options.index(current) if current in options else None
-            st.radio(label, options=options, index=index, key=widget_key(case, key))
+            render_editable_question(case, key)
 
         st.markdown("**DWI**")
         for key in [
             "DWI_Req_SpessoreLE4mm",
             "DWI_Req_Bhigh_GE1400",
             "DWI_Req_ADC_due_b_fino1000",
+        ]:
+            render_fixed_yes_question(case, key)
+        for key in [
             "DWI_Item1_Contrasto_SNR_b_alto",
             "DWI_Item2_Contrasto_ADC_TZ_BPH_PZ",
             "DWI_Item3_Artefatti_regione_prostatica",
             "DWI_Item4_Corrispondenza_ADC_balto_con_T2AX",
         ]:
-            label, options = QUESTION_SPECS[key]
-            current = answer_from_state(case, key)
-            index = options.index(current) if current in options else None
-            st.radio(label, options=options, index=index, key=widget_key(case, key))
+            render_editable_question(case, key)
 
         st.markdown("**DCE**")
         for key in [
             "DCE_Req_Spessore3mm",
             "DCE_Req_RisoluzioneTemporaleLE15s",
+        ]:
+            render_fixed_yes_question(case, key)
+        for key in [
             "DCE_Req_FatSat_o_PostProcessing",
             "DCE_Item1_Artefatti_e_Bolo",
             "DCE_Item2_Strutture_anatomiche_identificabili",
         ]:
-            label, options = QUESTION_SPECS[key]
-            current = answer_from_state(case, key)
-            index = options.index(current) if current in options else None
-            st.radio(label, options=options, index=index, key=widget_key(case, key))
+            render_editable_question(case, key)
 
         answers = get_case_answers(case)
         st.info(
@@ -312,10 +422,21 @@ def main():
         return
 
     init_session_state(cases)
+    assign_next_evaluator_id(force=False)
 
     with st.sidebar:
         st.header("Valutatore")
-        st.text_input("ID valutatore", key="eval_id")
+        c_id1, c_id2 = st.columns([3, 1])
+        with c_id1:
+            st.text_input("ID valutatore", key="eval_id")
+        with c_id2:
+            st.write("")
+            st.write("")
+            if st.button("Nuovo ID", use_container_width=True):
+                assign_next_evaluator_id(force=True)
+                st.rerun()
+
+        st.caption(f"Prossimo ID automatico con prefisso {EVALUATOR_ID_PREFIX} e esclusione degli ID già usati.")
         st.text_input("Nome", key="eval_nome")
         st.text_input("Cognome", key="eval_cognome")
         st.text_input("Anni esperienza TSRM", key="eval_esperienza")
