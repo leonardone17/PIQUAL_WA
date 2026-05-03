@@ -175,22 +175,31 @@ def load_evaluator_data(cases: List[CaseData]):
     if not evaluator_id:
         st.session_state.last_message = ("warning", "Inserisci prima ID valutatore.")
         return
+
     db = get_db()
     profile = db.load_evaluator_profile(evaluator_id)
-    if profile:
-        st.session_state.eval_nome = profile["Nome"]
-        st.session_state.eval_cognome = profile["Cognome"]
-        st.session_state.eval_esperienza = profile["Anni_esperienza_TSRM"]
-        st.session_state.eval_stato = profile["Stato_professionale"]
+    if not profile:
+        st.session_state.last_message = ("warning", f"Nessun valutatore trovato con ID {evaluator_id}.")
+        return
+
+    st.session_state["eval_nome"] = profile["Nome"]
+    st.session_state["eval_cognome"] = profile["Cognome"]
+    st.session_state["eval_esperienza"] = profile["Anni_esperienza_TSRM"]
+    st.session_state["eval_stato"] = profile["Stato_professionale"]
+
     statuses = db.load_all_case_status(evaluator_id)
-    st.session_state.case_status = statuses
+    st.session_state["case_status"] = statuses
+    saved_once = st.session_state.get("saved_once", {})
+
     for case in cases:
-        st.session_state.saved_once[case.folder_name] = case.folder_name in statuses
+        saved_once[case.folder_name] = case.folder_name in statuses
         case_data = db.load_case_response(evaluator_id, case.folder_name)
         if case_data:
             set_answers_from_db(case, case_data)
+
+    st.session_state["saved_once"] = saved_once
     enforce_forced_yes_defaults(cases)
-    st.session_state.last_message = ("success", "Dati del valutatore caricati.")
+    st.session_state["last_message"] = ("success", "Dati del valutatore caricati.")
 
 
 def build_profile() -> EvaluatorProfile | None:
@@ -443,9 +452,12 @@ def main():
         st.text_input("Cognome", key="eval_cognome")
         st.text_input("Anni esperienza TSRM", key="eval_esperienza")
         st.selectbox("Stato professionale", ["", "Studente", "Professionista"], key="eval_stato")
-        if st.button("Carica dati esistenti", use_container_width=True):
-            load_evaluator_data(cases)
-            st.rerun()
+        st.button(
+            "Carica dati esistenti",
+            use_container_width=True,
+            on_click=load_evaluator_data,
+            args=(cases,),
+        )
         st.divider()
         st.write(f"Cartella casi: `{Path(case_root)}`")
 
